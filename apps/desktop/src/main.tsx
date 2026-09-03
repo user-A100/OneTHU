@@ -15,6 +15,12 @@ installAuthWatchdog();
 import "@onethu/ui/base.css";
 import "./styles/global.css";
 import { App } from "./App.js";
+import { applyAppIcon, isAndroid, loadAppIconId } from "./lib/appIcon.js";
+
+// 恢复窗口/任务栏图标：仅桌面（Android 组件状态由系统持久化，重放反而触发桌面重绘）
+void isAndroid().then((android) => {
+  if (!android) void applyAppIcon(loadAppIconId()).catch(() => undefined);
+});
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
