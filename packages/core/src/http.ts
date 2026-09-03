@@ -274,9 +274,38 @@ export class HttpClient {
     return this;
   }
 
+  /* —— 乐观启动请求闸门 ——
+   * app 端启动时先渲染缓存页面、后台校验会话：校验完成前数据层请求若提前
+   * 发出（learn 的 csrf 未取到）会抛 AuthRequiredError 误触全局重载。
+   * hold 住所有请求，校验链自身经 runUngated 跳过闸门。 */
+  #gate: Promise<void> | null = null;
+  #gateBypass = false;
+
+  /** 安装/移除请求闸门：gate 为 pending Promise 时所有请求挂起，置 null 恢复 */
+  setGate(gate: Promise<void> | null): this {
+    this.#gate = gate;
+    return this;
+  }
+
+  /** 在闸门挂起期间仍放行请求的执行上下文（后台会话校验链用） */
+  async runUngated<T>(fn: () => Promise<T>): Promise<T> {
+    const prev = this.#gateBypass;
+    this.#gateBypass = true;
+    try {
+      return await fn();
+    } finally {
+      this.#gateBypass = prev;
+    }
+  }
+
+  async #awaitGate(): Promise<void> {
+    if (this.#gate && !this.#gateBypass) await this.#gate.catch(() => undefined);
+  }
+
   /** 请求一次，自动带 cookie；物理响应的 Set-Cookie 记入 jar。
    *  init.direct=true 时绕过 WebVPN 包装（CAS/doubleAuth 必须与登录同一域直连）。 */
   async request(url: string, init: (RequestInit & { direct?: boolean }) = {}, attempt = 0): Promise<Response> {
+    await this.#awaitGate();
     const { direct, ...rest } = init;
     // 传输分流规则（v6.1 定案）：
     // - learn.tsinghua.edu.cn：公网站点且会话 cookie 与 id CAS 同名（JSESSIONID），

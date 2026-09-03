@@ -136,6 +136,26 @@ export function AppProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     let cancelled = false;
     void (async () => {
+      // 乐观启动：本地有会话快照 → 纯本地水合（无网络）后立即进入应用，
+      // 页面全部缓存优先渲染；网络校验后台进行（数据请求由闸门挂起，
+      // 校验/静默重登成功后放行），彻底失效才回登录页。
+      try {
+        const saved = await clients.hydrateSession();
+        if (saved && ((saved.cookiesJson && saved.cookiesJson !== "{}") || saved.demoCookies)) {
+          if (cancelled) return;
+          setUser({ username: saved.username ?? "" });
+          setStatus("ready");
+          void clients.validateSessionInBackground(() => {
+            if (cancelled) return;
+            setUser(null);
+            setStatus("logged-out");
+          });
+          return;
+        }
+      } catch {
+        /* 水合异常走原流程 */
+      }
+      // 无快照（首次/已登出）：原 booting 流程（无网络等待，很快）
       let ok = false;
       try {
         ok = await clients.resumeSession();

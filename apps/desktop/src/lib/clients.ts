@@ -215,6 +215,7 @@ export async function login(
     const result = await attempt(username, password, savedMode === "webvpn");
     if (result.state === "ready") {
       await persist();
+      releaseRequests(); // 登录成功：放行乐观启动期间挂起的数据请求
       await logLine("LOGIN-OK\n" + session.debugLog.join("\n"));
     }
     return result;
@@ -224,7 +225,10 @@ export async function login(
       http.jar.clear();
       const result = await attempt(username, password, true);
       globalThis.localStorage?.setItem(TRANSPORT_KEY, "webvpn");
-      if (result.state === "ready") await persist();
+      if (result.state === "ready") {
+        await persist();
+        releaseRequests();
+      }
       return result;
     }
     // 对称反向降级（#4）：webvpn 链路网络错误 → 试一次 direct，成功则回切
@@ -234,7 +238,10 @@ export async function login(
         const result = await attempt(username, password, false);
         globalThis.localStorage?.removeItem(TRANSPORT_KEY);
         await logLine("TRANSPORT webvpn→direct 反向降级：webvpn 网络错误，直连重试成功");
-        if (result.state === "ready") await persist();
+        if (result.state === "ready") {
+          await persist();
+          releaseRequests();
+        }
         return result;
       } catch {
         /* direct 也不通：落回原错误 */
@@ -378,7 +385,9 @@ async function loadFinger3(): Promise<string> {
   return saved?.finger3 ?? "";
 }
 
-export async function resumeSession(): Promise<boolean> {
+/** 本地会话水合（无网络）：读快照 → 灌 jar/session/凭据。乐观启动先调它
+ *  立即渲染缓存页面；resumeSession 的本地前半段。返回 null = 无可用快照。 */
+export async function hydrateSession(): Promise<SessionData | null> {
   let saved = await store.loadSession();
   if (!saved) {
     // localStorage 缺失（WKWebView 驱逐/清空）：从 appData 文件回灌并写回本地
@@ -393,10 +402,7 @@ export async function resumeSession(): Promise<boolean> {
       }
     }
   }
-  if (!saved) {
-    await logLine("RESUME no-saved-session");
-    return false;
-  }
+  if (!saved) return null;
   http.withWebVPN(globalThis.localStorage?.getItem(TRANSPORT_KEY) === "webvpn");
   http.jar.hydrate(saved.cookiesJson);
   session.username = saved.username;
@@ -408,6 +414,15 @@ export async function resumeSession(): Promise<boolean> {
   const remembered = await loadRemembered();
   if (remembered) session.injectCredentials(remembered.username, remembered.password);
   session.reseed();
+  return saved;
+}
+
+export async function resumeSession(): Promise<boolean> {
+  const saved = await hydrateSession();
+  if (!saved) {
+    await logLine("RESUME no-saved-session");
+    return false;
+  }
   let okLearn = await learn.resume().catch((e) => {
     logLine("RESUME learn-error " + String(e)).catch(() => undefined);
     return false;
@@ -467,6 +482,51 @@ export async function trySilentRelogin(): Promise<boolean> {
     await logLine("SILENT-RELOGIN fail " + String(err)).catch(() => undefined);
     return false;
   }
+}
+
+/* ---------- 乐观启动闸门 ---------- */
+let gateResolve: (() => void) | null = null;
+
+/** 挂起所有 http 请求（数据层防止在会话校验完成前发出，csrf 未就绪会误触全局重载） */
+function holdRequests(): void {
+  http.setGate(
+    new Promise<void>((res) => {
+      gateResolve = res;
+    }),
+  );
+}
+
+/** 放行闸门：校验/登录成功时调用。校验彻底失败则不放行——挂起的页面请求
+ *  不再发出（此时 UI 已回登录页，放行只会让它们撞上失效会话触发整页重载）。 */
+export function releaseRequests(): void {
+  http.setGate(null);
+  gateResolve?.();
+  gateResolve = null;
+}
+
+/** 乐观启动的后台会话校验：resume → 静默重登，全链路免闸门 + 免广播
+ *  （内部 AuthRequired 不触发看门狗）。两者都败 → onDead（UI 回登录页）。 */
+export async function validateSessionInBackground(onDead: () => void): Promise<void> {
+  holdRequests();
+  const { suspendAuthBroadcast } = await import("@onethu/core");
+  let ok = false;
+  try {
+    ok = await suspendAuthBroadcast(() => http.runUngated(() => resumeSession()));
+  } catch {
+    ok = false;
+  }
+  if (ok) {
+    releaseRequests();
+    return;
+  }
+  const silent = await suspendAuthBroadcast(() => http.runUngated(() => trySilentRelogin())).catch(
+    () => false,
+  );
+  if (silent) {
+    releaseRequests();
+    return;
+  }
+  onDead();
 }
 
 export async function logout(): Promise<void> {
