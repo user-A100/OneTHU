@@ -13,7 +13,8 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 encoding_rs = "0.8"
-tauri = { version = "2", features = [] }
+# image-png：换图标（set_app_icon）解码内嵌 PNG 用
+tauri = { version = "2", features = ["image-png"] }
 # 外链走系统浏览器：webview 内 window.open/<a target=_blank> 均无效
 tauri-plugin-opener = "2"
 serde = { version = "1", features = ["derive"] }
@@ -22,6 +23,11 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 url = "2"
 # 已在依赖树中（reqwest 传递依赖 0.22.1），直连引用无新增下载
 base64 = "0.22"
+
+# Android 换桌面图标：手工 JNI 调 PackageManager.setComponentEnabledSetting
+# （wry/tao 不初始化 ndk-context，不能走 ndk-context::android_context()）
+[target.'cfg(target_os = "android")'.dependencies]
+jni = "0.21"
 
 [profile.release]
 strip = true

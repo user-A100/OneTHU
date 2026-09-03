@@ -437,6 +437,241 @@ async fn http_request(input: HttpInput) -> Result<HttpOutput, String> {
     })
 }
 
+// —— Android JNI 基础设施（换图标用）——
+// wry 0.55 / tao 0.35 不初始化 ndk-context，调 ndk_context::android_context() 必 panic。
+// 改为：JNI_OnLoad 捕获 JavaVM；MainActivity.onCreate 调 external fun storeActivity
+// 把自身（即 Context）存成 GlobalRef。
+#[cfg(target_os = "android")]
+static ANDROID_VM: std::sync::OnceLock<jni::JavaVM> = std::sync::OnceLock::new();
+
+#[cfg(target_os = "android")]
+static ANDROID_ACTIVITY: std::sync::Mutex<Option<jni::objects::GlobalRef>> =
+    std::sync::Mutex::new(None);
+
+#[cfg(target_os = "android")]
+#[allow(non_snake_case)]
+#[no_mangle]
+extern "C" fn JNI_OnLoad(
+    vm: *mut jni::sys::JavaVM,
+    _reserved: *mut std::ffi::c_void,
+) -> jni::sys::jint {
+    unsafe {
+        if let Ok(vm) = jni::JavaVM::from_raw(vm) {
+            let _ = ANDROID_VM.set(vm);
+        }
+    }
+    jni::sys::JNI_VERSION_1_6
+}
+
+/// MainActivity.onCreate 调用（companion init 已 loadLibrary）：把 Activity
+/// （即 Context）存为 GlobalRef，供 set_app_icon 等 JNI 调用使用。
+#[cfg(target_os = "android")]
+#[allow(non_snake_case)]
+#[no_mangle]
+extern "C" fn Java_app_onethu_desktop_MainActivity_storeActivity(
+    env: jni::JNIEnv,
+    this: jni::objects::JObject,
+) {
+    let global = env.new_global_ref(this).ok();
+    *ANDROID_ACTIVITY.lock().unwrap() = global;
+    android_log_e("storeActivity: 已注册");
+}
+
+/// 取已 attach 的 JNIEnv；未 attach 的线程永久附加（绝不 attach_current_thread——
+/// AttachGuard drop 会 detach IPC 线程，导致后续 JNI 调用 SIGABRT）。
+#[cfg(target_os = "android")]
+fn android_env() -> Result<jni::JNIEnv<'static>, String> {
+    let vm = ANDROID_VM
+        .get()
+        .ok_or("JavaVM 未初始化（JNI_OnLoad 未跑？）")?;
+    match vm.get_env() {
+        Ok(env) => Ok(env),
+        Err(_) => vm
+            .attach_current_thread_permanently()
+            .map_err(|e| e.to_string()),
+    }
+}
+
+/// 诊断辅助：把消息打到 logcat（TAG: ONETHU）。未 attach 线程永久附加。
+#[cfg(target_os = "android")]
+fn android_log_e(msg: &str) {
+    use jni::objects::JValue;
+    let Ok(vm) = ANDROID_VM.get().ok_or(()) else { return };
+    let Ok(mut env) = (match vm.get_env() {
+        Ok(env) => Ok(env),
+        Err(_) => vm.attach_current_thread_permanently(),
+    }) else {
+        return;
+    };
+    let (Ok(cls), Ok(tag), Ok(text)) = (
+        env.find_class("android/util/Log"),
+        env.new_string("ONETHU"),
+        env.new_string(msg),
+    ) else {
+        return;
+    };
+    let _ = env.call_static_method(
+        cls,
+        "e",
+        "(Ljava/lang/String;Ljava/lang/String;)I",
+        &[JValue::Object(&tag.into()), JValue::Object(&text.into())],
+    );
+}
+
+/// 当前 Activity。GlobalRef 常驻 static 保活；这里把指针包成普通 JObject
+/// 返回（JObject drop 不删除引用，删除只在 AutoLocal 发生），借用不越过本函数。
+#[cfg(target_os = "android")]
+fn android_activity() -> Result<jni::objects::JObject<'static>, String> {
+    let guard = ANDROID_ACTIVITY.lock().unwrap();
+    let g = guard
+        .as_ref()
+        .ok_or_else(|| "Activity 未注册（storeActivity 未调用？）".to_string())?;
+    let ptr = g.as_obj().as_raw();
+    Ok(unsafe { jni::objects::JObject::from_raw(ptr) })
+}
+
+/// Android 换桌面图标（legado LauncherIconHelp 同款）：切换入口组件启用态。
+/// 别名见 gen/android AndroidManifest.xml（.MainActivityThuInfo，默认禁用）。
+/// 顺序固定：先启用目标、后禁用另一个——桌面任一时刻都有入口，不会变砖。
+/// 组件状态由系统持久化，启动时无需重放。
+#[cfg(target_os = "android")]
+#[tauri::command]
+fn set_app_icon(name: String) -> Result<(), String> {
+    // panic 跨 JNI 边界是 UB（表现为 webview 报 "Java exception was raised"
+    // 而非真实错误），catch_unwind 挡住并转成普通 Err
+    let result =
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| set_app_icon_inner(name)))
+            .unwrap_or_else(|p| {
+                let msg = p
+                    .downcast_ref::<String>()
+                    .cloned()
+                    .or_else(|| p.downcast_ref::<&str>().map(|s| s.to_string()))
+                    .unwrap_or_else(|| "未知 panic".into());
+                Err(format!("内部错误（已捕获）: {msg}"))
+            });
+    // 总出口日志：任何 `?` 早退路径都会经过这里
+    match &result {
+        Ok(()) => android_log_e("set_app_icon: 成功"),
+        Err(e) => android_log_e(&format!("set_app_icon: 失败 —— {e}")),
+    }
+    result
+}
+
+#[cfg(target_os = "android")]
+fn set_app_icon_inner(name: String) -> Result<(), String> {
+    android_log_e(&format!("set_app_icon: 开始 {name}"));
+    // 实际逻辑在 Kotlin LauncherIcon.set（方法编译期解析；此前 Rust 按名调
+    // getPackageManager 在真机触发 NoSuchMethodError + pending exception SIGABRT）
+    let ret = call_launcher_icon("set", &name)?;
+    if ret.is_empty() {
+        Ok(())
+    } else {
+        Err(ret)
+    }
+}
+
+/// 调 Kotlin 侧 LauncherIcon 静态方法（Context + 可选图标 id → String）。
+/// 任何 JNI 错误都先 exception_clear，避免 pending exception 毒化后续调用。
+#[cfg(target_os = "android")]
+fn call_launcher_icon(method: &str, name: &str) -> Result<String, String> {
+    use jni::objects::JValue;
+
+    let mut env = android_env()?;
+    let context = android_activity()?;
+
+    let cls = env
+        .find_class("app/onethu/desktop/LauncherIcon")
+        .map_err(|e| format!("find_class LauncherIcon 失败: {e}"))?;
+    let jname = env.new_string(name).map_err(|e| e.to_string())?;
+
+    let call = env.call_static_method(
+        &cls,
+        method,
+        "(Landroid/content/Context;Ljava/lang/String;)Ljava/lang/String;",
+        &[JValue::Object(&context), JValue::Object(&jname)],
+    );
+    if let Err(e) = &call {
+        let _ = env.exception_clear(); // 关键：清 pending exception，防后续 JNI abort
+        return Err(format!("LauncherIcon.{method} 调用失败: {e}"));
+    }
+    let jobj = call
+        .and_then(|v| v.l())
+        .map_err(|e| format!("返回值转换失败: {e}"))?;
+    let s: String = env
+        .get_string((&jobj).into())
+        .map_err(|e| format!("返回值读取失败: {e}"))?
+        .into();
+    Ok(s)
+}
+
+/// Android：查询当前生效的入口组件（选择器 UI 与系统真实状态同步用）。
+/// 实际逻辑在 Kotlin LauncherIcon.get。
+#[cfg(target_os = "android")]
+#[tauri::command]
+fn get_app_icon() -> Result<String, String> {
+    call_launcher_icon("get", "")
+}
+
+#[cfg(target_os = "android")]
+#[tauri::command]
+fn is_android() -> bool {
+    true
+}
+
+/// 桌面：运行时切换主窗口图标。Windows 任务栏即时生效；.exe 文件图标为
+/// 编译期资源不可变；macOS 不支持运行时更改（静默 Err）。
+#[cfg(not(mobile))]
+#[tauri::command]
+fn set_app_icon(app: tauri::AppHandle, name: String) -> Result<(), String> {
+    let bytes: &[u8] = match name.as_str() {
+        "onethu" => include_bytes!("../icons/icon.png"),
+        "thuinfo" => include_bytes!("../icons/icon-thuinfo.png"),
+        "mascot" => include_bytes!("../icons/icon-mascot.png"),
+        "custom" => return Ok(()), // 自定义走 set_app_icon_custom
+        other => return Err(format!("未知图标: {other}")),
+    };
+    let img = tauri::image::Image::from_bytes(bytes).map_err(|e| e.to_string())?;
+    let win = app
+        .get_webview_window("main")
+        .ok_or_else(|| "主窗口不存在".to_string())?;
+    win.set_icon(img).map_err(|e| e.to_string())
+}
+
+/// 桌面自定义图标：前端规整为 256×256 PNG base64 传入（同源数据存 Rust 状态文件）
+#[cfg(not(mobile))]
+#[tauri::command]
+fn set_app_icon_custom(app: tauri::AppHandle, png_b64: String) -> Result<(), String> {
+    use base64::Engine as _;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(png_b64.trim())
+        .map_err(|e| format!("base64 解码失败: {e}"))?;
+    let img = tauri::image::Image::from_bytes(&bytes).map_err(|e| format!("PNG 解码失败: {e}"))?;
+    let win = app
+        .get_webview_window("main")
+        .ok_or_else(|| "主窗口不存在".to_string())?;
+    win.set_icon(img).map_err(|e| e.to_string())
+}
+
+/// Android 桌面图标需编译期预置 alias，自定义图标不支持——前端用 is_android 隐藏入口
+#[cfg(target_os = "android")]
+#[tauri::command]
+fn set_app_icon_custom(_app: tauri::AppHandle, _png_b64: String) -> Result<(), String> {
+    Err("自定义图标暂仅桌面端支持".into())
+}
+
+/// 桌面选择由前端 localStorage 记账，此处无系统状态可查
+#[cfg(not(target_os = "android"))]
+#[tauri::command]
+fn get_app_icon() -> Result<String, String> {
+    Ok("onethu".into())
+}
+
+#[cfg(not(target_os = "android"))]
+#[tauri::command]
+fn is_android() -> bool {
+    false
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     #[cfg(desktop)]
@@ -800,7 +1035,7 @@ tauri::Builder::default()
         })
         .invoke_handler(tauri::generate_handler![
             log_debug,http_request,download_file,fetch_binary,state_read,state_write,state_delete,
-            open_external,open_eid_window,open_sports_window,venue_sso_set])
+            open_external,open_eid_window,open_sports_window,venue_sso_set,set_app_icon,set_app_icon_custom,get_app_icon,is_android])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
