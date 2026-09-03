@@ -474,6 +474,7 @@ extern "C" fn Java_app_onethu_desktop_MainActivity_storeActivity(
 ) {
     let global = env.new_global_ref(this).ok();
     *ANDROID_ACTIVITY.lock().unwrap() = global;
+    android_log_e("storeActivity: 已注册");
 }
 
 /// 取已 attach 的 JNIEnv；未 attach 的线程永久附加（绝不 attach_current_thread——
@@ -491,15 +492,42 @@ fn android_env() -> Result<jni::JNIEnv<'static>, String> {
     }
 }
 
-/// 当前 Activity（GlobalRef 生命周期为 'static，as_obj 借用安全）
+/// 诊断辅助：把消息打到 logcat（TAG: ONETHU）。未 attach 线程永久附加。
+#[cfg(target_os = "android")]
+fn android_log_e(msg: &str) {
+    use jni::objects::JValue;
+    let Ok(vm) = ANDROID_VM.get().ok_or(()) else { return };
+    let Ok(mut env) = (match vm.get_env() {
+        Ok(env) => Ok(env),
+        Err(_) => vm.attach_current_thread_permanently(),
+    }) else {
+        return;
+    };
+    let (Ok(cls), Ok(tag), Ok(text)) = (
+        env.find_class("android/util/Log"),
+        env.new_string("ONETHU"),
+        env.new_string(msg),
+    ) else {
+        return;
+    };
+    let _ = env.call_static_method(
+        cls,
+        "e",
+        "(Ljava/lang/String;Ljava/lang/String;)I",
+        &[JValue::Object(&tag.into()), JValue::Object(&text.into())],
+    );
+}
+
+/// 当前 Activity。GlobalRef 常驻 static 保活；这里把指针包成普通 JObject
+/// 返回（JObject drop 不删除引用，删除只在 AutoLocal 发生），借用不越过本函数。
 #[cfg(target_os = "android")]
 fn android_activity() -> Result<jni::objects::JObject<'static>, String> {
-    ANDROID_ACTIVITY
-        .lock()
-        .unwrap()
+    let guard = ANDROID_ACTIVITY.lock().unwrap();
+    let g = guard
         .as_ref()
-        .map(|g| g.as_obj())
-        .ok_or_else(|| "Activity 未注册（storeActivity 未调用？）".to_string())
+        .ok_or_else(|| "Activity 未注册（storeActivity 未调用？）".to_string())?;
+    let ptr = g.as_obj().as_raw();
+    Ok(unsafe { jni::objects::JObject::from_raw(ptr) })
 }
 
 /// Android 换桌面图标（legado LauncherIconHelp 同款）：切换入口组件启用态。
@@ -509,6 +537,22 @@ fn android_activity() -> Result<jni::objects::JObject<'static>, String> {
 #[cfg(target_os = "android")]
 #[tauri::command]
 fn set_app_icon(name: String) -> Result<(), String> {
+    // panic 跨 JNI 边界是 UB（表现为 webview 报 "Java exception was raised"
+    // 而非真实错误），catch_unwind 挡住并转成普通 Err
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| set_app_icon_inner(name)))
+        .unwrap_or_else(|p| {
+            let msg = p
+                .downcast_ref::<String>()
+                .cloned()
+                .or_else(|| p.downcast_ref::<&str>().map(|s| s.to_string()))
+                .unwrap_or_else(|| "未知 panic".into());
+            android_log_e(&format!("set_app_icon PANIC: {msg}"));
+            Err(format!("内部错误（已捕获）: {msg}"))
+        })
+}
+
+#[cfg(target_os = "android")]
+fn set_app_icon_inner(name: String) -> Result<(), String> {
     use jni::objects::JValue;
 
     // 图标 id → (目标入口, 另一个入口) 的组件相对类名
@@ -517,6 +561,7 @@ fn set_app_icon(name: String) -> Result<(), String> {
         "thuinfo" => (".MainActivityThuInfo", ".MainActivity"),
         other => return Err(format!("未知图标: {other}")),
     };
+    android_log_e(&format!("set_app_icon: 开始 target={target}"));
 
     let mut env = android_env()?;
     let context = android_activity()?;
@@ -562,8 +607,10 @@ fn set_app_icon(name: String) -> Result<(), String> {
         Ok(())
     };
 
-    set_component(&mut env, target, ENABLED)?;
-    set_component(&mut env, other, DISABLED)?;
+    set_component(&mut env, target, ENABLED).inspect_err(|e| android_log_e(&format!("启用目标失败: {e}")))?;
+    android_log_e("set_app_icon: 目标已启用，开始禁用另一入口");
+    set_component(&mut env, other, DISABLED).inspect_err(|e| android_log_e(&format!("禁用另一入口失败: {e}")))?;
+    android_log_e("set_app_icon: 完成");
     Ok(())
 }
 
