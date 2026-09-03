@@ -145,8 +145,18 @@ export function AppProvider({ children }: { children: ReactNode }) {
           if (cancelled) return;
           setUser({ username: saved.username ?? "" });
           setStatus("ready");
-          void clients.validateSessionInBackground(() => {
+          void clients.validateSessionInBackground((dead) => {
             if (cancelled) return;
+            if (dead?.twoFactor) {
+              // 静默重登要 2FA：直接弹验证码页（账密已存，只输码——thu-info-app 同款体验）
+              setTwoFactor({
+                username: dead.twoFactor.username,
+                password: dead.twoFactor.password,
+                methods: dead.twoFactor.methods,
+              });
+              setStatus("2fa");
+              return;
+            }
             setUser(null);
             setStatus("logged-out");
           });
@@ -170,12 +180,21 @@ export function AppProvider({ children }: { children: ReactNode }) {
         return;
       }
       // 恢复失败（learn/id 会话过期是常态）且勾选了记住密码 → 静默重登一次，免输密码
-      const silent = await clients.trySilentRelogin().catch(() => false);
+      const silent = await clients
+        .trySilentRelogin()
+        .catch((): clients.SilentReloginResult => ({ state: "fail" }));
       if (cancelled) return;
-      if (silent) {
+      if (silent.state === "ok") {
         const saved = await clients.store.loadSession();
         setUser({ username: saved?.username ?? "" });
         setStatus("ready");
+      } else if (silent.state === "need-2fa") {
+        setTwoFactor({
+          username: silent.username,
+          password: silent.password,
+          methods: silent.methods,
+        });
+        setStatus("2fa");
       } else {
         setStatus("logged-out");
       }

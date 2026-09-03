@@ -312,6 +312,7 @@ export async function verifyLearn2FA(code: string): Promise<void> {
   try {
     await session.verifyLearn2FA(code);
     await persist();
+    releaseRequests(); // 2FA 完成（登录链走通）：放行乐观启动期间挂起的请求
     await logLine("LEARN2FA-OK\n" + session.debugLog.join("\n"));
   } catch (err) {
     await dumpDebug(err);
@@ -323,7 +324,10 @@ export async function verifyLearn2FA(code: string): Promise<void> {
 export async function verify2FA(_type: string, code: string, trust: boolean): Promise<TwoFactorMethod[] | null> {
   try {
     const round2 = await session.verify2FA(code, trust);
-    if (!round2) await persist();
+    if (!round2) {
+      await persist();
+      releaseRequests(); // 2FA 完成（登录链走通）：放行乐观启动期间挂起的请求
+    }
     await logLine("VERIFY-OK round2=" + (round2 ? "yes" : "no") + "\n" + session.debugLog.join("\n"));
     return round2;
   } catch (err) {
@@ -461,26 +465,38 @@ async function hasLiveSnapshot(): Promise<boolean> {
   return false;
 }
 
-/** boot 恢复失败时的静默重登（记住密码）：成功 true；无存档/需 2FA/失败 false。
+/** 静默重登结果：ok=直接成功；need-2fa=账密有效但要二次验证（UI 直接弹验证码页，
+ *  只输码不输密码）；fail=彻底失败（回登录页） */
+export type SilentReloginResult =
+  | { state: "ok" }
+  | { state: "need-2fa"; username: string; password: string; methods: TwoFactorMethod[] }
+  | { state: "fail" };
+
+/** boot 恢复失败时的静默重登（记住密码）。
  *  显式登出后无会话快照 → 不触发，保证「退出登录」不被自动顶掉。 */
-export async function trySilentRelogin(): Promise<boolean> {
-  if (!(await hasLiveSnapshot())) return false;
+export async function trySilentRelogin(): Promise<SilentReloginResult> {
+  if (!(await hasLiveSnapshot())) return { state: "fail" };
   const remembered = await loadRemembered();
   if (!remembered) {
     await logLine("SILENT-RELOGIN skip: 无记住的密码").catch(() => undefined);
-    return false;
+    return { state: "fail" };
   }
   try {
     const result = await login(remembered.username, remembered.password, { remember: true });
     if (result.state === "ready") {
       await logLine("SILENT-RELOGIN ok").catch(() => undefined);
-      return true;
+      return { state: "ok" };
     }
     await logLine("SILENT-RELOGIN need-2fa").catch(() => undefined);
-    return false;
+    return {
+      state: "need-2fa",
+      username: remembered.username,
+      password: remembered.password,
+      methods: result.methods,
+    };
   } catch (err) {
     await logLine("SILENT-RELOGIN fail " + String(err)).catch(() => undefined);
-    return false;
+    return { state: "fail" };
   }
 }
 
@@ -504,9 +520,17 @@ export function releaseRequests(): void {
   gateResolve = null;
 }
 
+/** 乐观启动校验失败时的去向：twoFactor 带上下文 = 直接弹验证码页（只输码），
+ *  null = 回完整登录页 */
+export interface ValidationDead {
+  twoFactor?: { username: string; password: string; methods: TwoFactorMethod[] };
+}
+
 /** 乐观启动的后台会话校验：resume → 静默重登，全链路免闸门 + 免广播
- *  （内部 AuthRequired 不触发看门狗）。两者都败 → onDead（UI 回登录页）。 */
-export async function validateSessionInBackground(onDead: () => void): Promise<void> {
+ *  （内部 AuthRequired 不触发看门狗）。需 2FA → 弹验证码页；彻底失败 → 登录页。 */
+export async function validateSessionInBackground(
+  onDead: (dead: ValidationDead | null) => void,
+): Promise<void> {
   holdRequests();
   const { suspendAuthBroadcast } = await import("@onethu/core");
   let ok = false;
@@ -520,16 +544,21 @@ export async function validateSessionInBackground(onDead: () => void): Promise<v
     releaseRequests();
     return;
   }
-  const silent = await suspendAuthBroadcast(() => http.runUngated(() => trySilentRelogin())).catch(
-    () => false,
-  );
-  if (silent) {
+  const silent = await suspendAuthBroadcast(() =>
+    http.runUngated(() => trySilentRelogin()),
+  ).catch((): SilentReloginResult => ({ state: "fail" }));
+  if (silent.state === "ok") {
     await logLine("OPTIMISTIC-BOOT 静默重登成功").catch(() => undefined);
     releaseRequests();
     return;
   }
+  if (silent.state === "need-2fa") {
+    await logLine("OPTIMISTIC-BOOT 静默重登需 2FA → 弹验证码页").catch(() => undefined);
+    onDead({ twoFactor: silent });
+    return;
+  }
   await logLine("OPTIMISTIC-BOOT 会话彻底失效 → 回登录页").catch(() => undefined);
-  onDead();
+  onDead(null);
 }
 
 export async function logout(): Promise<void> {
