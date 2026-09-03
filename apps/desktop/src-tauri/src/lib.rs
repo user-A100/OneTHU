@@ -539,120 +539,77 @@ fn android_activity() -> Result<jni::objects::JObject<'static>, String> {
 fn set_app_icon(name: String) -> Result<(), String> {
     // panic 跨 JNI 边界是 UB（表现为 webview 报 "Java exception was raised"
     // 而非真实错误），catch_unwind 挡住并转成普通 Err
-    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| set_app_icon_inner(name)))
-        .unwrap_or_else(|p| {
-            let msg = p
-                .downcast_ref::<String>()
-                .cloned()
-                .or_else(|| p.downcast_ref::<&str>().map(|s| s.to_string()))
-                .unwrap_or_else(|| "未知 panic".into());
-            android_log_e(&format!("set_app_icon PANIC: {msg}"));
-            Err(format!("内部错误（已捕获）: {msg}"))
-        })
+    let result =
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| set_app_icon_inner(name)))
+            .unwrap_or_else(|p| {
+                let msg = p
+                    .downcast_ref::<String>()
+                    .cloned()
+                    .or_else(|| p.downcast_ref::<&str>().map(|s| s.to_string()))
+                    .unwrap_or_else(|| "未知 panic".into());
+                Err(format!("内部错误（已捕获）: {msg}"))
+            });
+    // 总出口日志：任何 `?` 早退路径都会经过这里
+    match &result {
+        Ok(()) => android_log_e("set_app_icon: 成功"),
+        Err(e) => android_log_e(&format!("set_app_icon: 失败 —— {e}")),
+    }
+    result
 }
 
 #[cfg(target_os = "android")]
 fn set_app_icon_inner(name: String) -> Result<(), String> {
-    use jni::objects::JValue;
+    android_log_e(&format!("set_app_icon: 开始 {name}"));
+    // 实际逻辑在 Kotlin LauncherIcon.set（方法编译期解析；此前 Rust 按名调
+    // getPackageManager 在真机触发 NoSuchMethodError + pending exception SIGABRT）
+    let ret = call_launcher_icon("set", &name)?;
+    if ret.is_empty() {
+        Ok(())
+    } else {
+        Err(ret)
+    }
+}
 
-    // 图标 id → (目标入口, 另一个入口) 的组件相对类名
-    let (target, other) = match name.as_str() {
-        "onethu" => (".MainActivity", ".MainActivityThuInfo"),
-        "thuinfo" => (".MainActivityThuInfo", ".MainActivity"),
-        other => return Err(format!("未知图标: {other}")),
-    };
-    android_log_e(&format!("set_app_icon: 开始 target={target}"));
+/// 调 Kotlin 侧 LauncherIcon 静态方法（Context + 可选图标 id → String）。
+/// 任何 JNI 错误都先 exception_clear，避免 pending exception 毒化后续调用。
+#[cfg(target_os = "android")]
+fn call_launcher_icon(method: &str, name: &str) -> Result<String, String> {
+    use jni::objects::JValue;
 
     let mut env = android_env()?;
     let context = android_activity()?;
 
-    let pm = env
-        .call_method(
-            &context,
-            "getPackageManager",
-            "()Landroid/content/PackageManager;",
-            &[],
-        )
+    let cls = env
+        .find_class("app/onethu/desktop/LauncherIcon")
+        .map_err(|e| format!("find_class LauncherIcon 失败: {e}"))?;
+    let jname = env.new_string(name).map_err(|e| e.to_string())?;
+
+    let call = env.call_static_method(
+        &cls,
+        method,
+        "(Landroid/content/Context;Ljava/lang/String;)Ljava/lang/String;",
+        &[JValue::Object(&context), JValue::Object(&jname)],
+    );
+    if let Err(e) = &call {
+        let _ = env.exception_clear(); // 关键：清 pending exception，防后续 JNI abort
+        return Err(format!("LauncherIcon.{method} 调用失败: {e}"));
+    }
+    let jobj = call
         .and_then(|v| v.l())
-        .map_err(|e| format!("getPackageManager 失败: {e}"))?;
-
-    const ENABLED: i32 = 1; // COMPONENT_ENABLED_STATE_ENABLED
-    const DISABLED: i32 = 2; // COMPONENT_ENABLED_STATE_DISABLED（legado 同款）
-    const DONT_KILL_APP: i32 = 1;
-
-    let set_component = |env: &mut jni::JNIEnv, class: &str, state: i32| -> Result<(), String> {
-        let comp_class = env
-            .find_class("android/content/ComponentName")
-            .map_err(|e| format!("find_class ComponentName 失败: {e}"))?;
-        let pkg = env.new_string("app.onethu.desktop").map_err(|e| e.to_string())?;
-        let cls = env.new_string(class).map_err(|e| e.to_string())?;
-        let comp = env
-            .new_object(
-                &comp_class,
-                "(Ljava/lang/String;Ljava/lang/String;)V",
-                &[JValue::Object(&pkg), JValue::Object(&cls)],
-            )
-            .map_err(|e| format!("new ComponentName 失败: {e}"))?;
-        env.call_method(
-            &pm,
-            "setComponentEnabledSetting",
-            "(Landroid/content/ComponentName;II)V",
-            &[
-                JValue::Object(&comp),
-                JValue::Int(state),
-                JValue::Int(DONT_KILL_APP),
-            ],
-        )
-        .map_err(|e| format!("setComponentEnabledSetting 失败: {e}"))?;
-        Ok(())
-    };
-
-    set_component(&mut env, target, ENABLED).inspect_err(|e| android_log_e(&format!("启用目标失败: {e}")))?;
-    android_log_e("set_app_icon: 目标已启用，开始禁用另一入口");
-    set_component(&mut env, other, DISABLED).inspect_err(|e| android_log_e(&format!("禁用另一入口失败: {e}")))?;
-    android_log_e("set_app_icon: 完成");
-    Ok(())
+        .map_err(|e| format!("返回值转换失败: {e}"))?;
+    let s: String = env
+        .get_string((&jobj).into())
+        .map_err(|e| format!("返回值读取失败: {e}"))?
+        .into();
+    Ok(s)
 }
 
 /// Android：查询当前生效的入口组件（选择器 UI 与系统真实状态同步用）。
-/// getComponentEnabledSetting：ENABLED(1)=别名在用；DEFAULT(0)/其他=默认入口。
+/// 实际逻辑在 Kotlin LauncherIcon.get。
 #[cfg(target_os = "android")]
 #[tauri::command]
 fn get_app_icon() -> Result<String, String> {
-    use jni::objects::JValue;
-    let mut env = android_env()?;
-    let context = android_activity()?;
-    let pm = env
-        .call_method(
-            &context,
-            "getPackageManager",
-            "()Landroid/content/PackageManager;",
-            &[],
-        )
-        .and_then(|v| v.l())
-        .map_err(|e| format!("getPackageManager 失败: {e}"))?;
-    let comp_class = env
-        .find_class("android/content/ComponentName")
-        .map_err(|e| e.to_string())?;
-    let pkg = env.new_string("app.onethu.desktop").map_err(|e| e.to_string())?;
-    let cls = env.new_string(".MainActivityThuInfo").map_err(|e| e.to_string())?;
-    let comp = env
-        .new_object(
-            &comp_class,
-            "(Ljava/lang/String;Ljava/lang/String;)V",
-            &[JValue::Object(&pkg), JValue::Object(&cls)],
-        )
-        .map_err(|e| e.to_string())?;
-    let state = env
-        .call_method(
-            &pm,
-            "getComponentEnabledSetting",
-            "(Landroid/content/ComponentName;)I",
-            &[JValue::Object(&comp)],
-        )
-        .and_then(|v| v.i())
-        .map_err(|e| format!("getComponentEnabledSetting 失败: {e}"))?;
-    Ok(if state == 1 { "thuinfo".into() } else { "onethu".into() })
+    call_launcher_icon("get", "")
 }
 
 #[cfg(target_os = "android")]
