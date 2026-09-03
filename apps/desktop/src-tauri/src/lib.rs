@@ -47,6 +47,9 @@ struct HttpOutput {
 #[tauri::command]
 fn log_debug(line: String) -> Result<(), String> {
     use std::io::Write;
+    // Android 无 /tmp 可写：日志同时打 logcat（TAG: ONETHU），文件尽力而为
+    #[cfg(target_os = "android")]
+    android_log_e(&line);
     const LOG: &str = "/tmp/onethu-debug.log";
     // 体积闸门：超 16MB 轮转为 .old（防 HTML dump 类循环刷盘——曾灌到 1GB）
     if let Ok(meta) = std::fs::metadata(LOG) {
@@ -54,11 +57,13 @@ fn log_debug(line: String) -> Result<(), String> {
             let _ = std::fs::rename(LOG, "/tmp/onethu-debug.log.old");
         }
     }
-    let mut f = std::fs::OpenOptions::new()
+    let Ok(mut f) = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(LOG)
-        .map_err(|e| e.to_string())?;
+    else {
+        return Ok(()); // 无 /tmp（Android）：只走 logcat，不视为错误
+    };
     let _ = writeln!(f, "{}", line);
     Ok(())
 }
@@ -227,18 +232,10 @@ fn percent_decode(s: &str) -> Option<String> {
 /// 落盘名：响应 Content-Disposition 真名优先，其次调用方传入名（title.fileType）。
 #[tauri::command]
 async fn download_file(url: String, cookies: String, filename: String) -> Result<String, String> {
-    let client = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::limited(10))
-        // 全部目标域均为 *.tsinghua.edu.cn，直连即可：强制绕过系统代理（reqwest 0.12
-        // 默认读 Windows/ macOS 系统代理，全局模式梯子会把清华流量送出境触发风控）。
-        // 仅救系统代理场景；TUN 网络层接管无解（参考 PR #2，user-A100）。
-        .no_proxy()
-        .user_agent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36")
-        .build()
-        .map_err(|e| e.to_string())?;
-    let resp = client
+    let resp = redirect_client()
         .get(&url)
         .header("Cookie", cookies)
+        .header("user-agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36")
         .send()
         .await
         .map_err(|e| e.to_string())?;
@@ -294,15 +291,10 @@ struct BinaryOut {
 /// webview 的 <img> 不携带应用会话 Cookie，直挂 learn 地址只会得到登录页/401。
 #[tauri::command]
 async fn fetch_binary(url: String, cookies: String) -> Result<BinaryOut, String> {
-    let client = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::limited(10))
-        .no_proxy() // 同 download_file：清华域直连，绕系统代理（参考 PR #2）
-        .user_agent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36")
-        .build()
-        .map_err(|e| e.to_string())?;
-    let resp = client
+    let resp = redirect_client()
         .get(&url)
         .header("Cookie", cookies)
+        .header("user-agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36")
         .send()
         .await
         .map_err(|e| e.to_string())?;
@@ -337,6 +329,39 @@ async fn fetch_binary(url: String, cookies: String) -> Result<BinaryOut, String>
     })
 }
 
+/// 全局共享 HTTP 客户端（连接池 + keep-alive 复用）。每请求新建 Client 会
+/// 重付 TCP+TLS 握手（移动网络 1-3s/次）——登录/恢复链串行十几个请求累计
+/// 十余秒的元凶。超时用 RequestBuilder::timeout 按请求覆盖。
+/// 两档：主通道不跟重定向（JS 层手动跟随）；下载/二进制跟 10 跳。
+/// 全部 no_proxy：目标域均 *.tsinghua.edu.cn 直连，reqwest 0.12 默认读系统
+/// 代理——全局模式梯子会把清华流量送出境：id 风控慢响应（转圈）、验证码与
+/// 会话出口 IP 不一致（对码判错）、响应被代理拦截（#1 实录）。
+/// ⚠️ 只救系统代理场景：TUN 模式在网络层接管，应用层无解（参考 PR #2）。
+static MAIN_CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+static REDIRECT_CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+
+fn main_client() -> &'static reqwest::Client {
+    MAIN_CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .no_proxy()
+            .pool_idle_timeout(Duration::from_secs(120))
+            .build()
+            .expect("reqwest Client 构建失败")
+    })
+}
+
+fn redirect_client() -> &'static reqwest::Client {
+    REDIRECT_CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::limited(10))
+            .no_proxy()
+            .pool_idle_timeout(Duration::from_secs(120))
+            .build()
+            .expect("reqwest Client 构建失败")
+    })
+}
+
 #[tauri::command]
 async fn http_request(input: HttpInput) -> Result<HttpOutput, String> {
     let method: reqwest::Method = input
@@ -345,19 +370,9 @@ async fn http_request(input: HttpInput) -> Result<HttpOutput, String> {
         .parse()
         .map_err(|e| format!("非法 HTTP 方法: {e}"))?;
 
-    let client = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        // 主网络通道：全部目标域均为 *.tsinghua.edu.cn（webvpn/id/learn/info/card…），
-        // 直连即可。reqwest 0.12 默认读 Windows/macOS 系统代理——全局模式梯子会把
-        // 清华流量送出境：id 风控慢响应（转圈）、验证码与会话出口 IP 不一致（对码
-        // 判错）、响应被代理拦截（点重发反而直接进入，#1 实录）。
-        // ⚠️ 只救系统代理场景：TUN 模式在网络层接管，应用层无解（参考 PR #2）。
-        .no_proxy()
-        .timeout(Duration::from_millis(input.timeout_ms.unwrap_or(20000)))
-        .build()
-        .map_err(|e| e.to_string())?;
-
-    let mut req = client.request(method, &input.url);
+    let mut req = main_client()
+        .request(method, &input.url)
+        .timeout(Duration::from_millis(input.timeout_ms.unwrap_or(20000)));
     for (k, v) in &input.headers {
         // 跳过宿主自动管理的头，避免重复/冲突
         let lower = k.to_lowercase();
@@ -889,18 +904,9 @@ async fn venue_proxy_fetch(
     });
     let url = format!("{VENUE_ORIGIN}{pq}");
     let method = request.method().clone();
-    let client = match reqwest::Client::builder()
-        // 主网络通道同 http_request：清华域直连，禁系统代理（#1 风控实录）
-        .no_proxy()
-        .redirect(reqwest::redirect::Policy::limited(5))
-        .timeout(Duration::from_secs(30))
-        .build()
-    {
-        Ok(c) => c,
-        Err(e) => return upstream_err(format!("proxy client: {e}")),
-    };
-    let mut req = client
+    let mut req = redirect_client()
         .request(method, &url)
+        .timeout(Duration::from_secs(30))
         .header("origin", VENUE_ORIGIN)
         .header("referer", format!("{VENUE_ORIGIN}/venue/index.html"));
     for (k, v) in request.headers() {

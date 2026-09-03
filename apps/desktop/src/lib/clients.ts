@@ -516,6 +516,7 @@ export async function validateSessionInBackground(onDead: () => void): Promise<v
     ok = false;
   }
   if (ok) {
+    await logLine("OPTIMISTIC-BOOT 校验通过（会话有效/重漫游成功）").catch(() => undefined);
     releaseRequests();
     return;
   }
@@ -523,9 +524,11 @@ export async function validateSessionInBackground(onDead: () => void): Promise<v
     () => false,
   );
   if (silent) {
+    await logLine("OPTIMISTIC-BOOT 静默重登成功").catch(() => undefined);
     releaseRequests();
     return;
   }
+  await logLine("OPTIMISTIC-BOOT 会话彻底失效 → 回登录页").catch(() => undefined);
   onDead();
 }
 
