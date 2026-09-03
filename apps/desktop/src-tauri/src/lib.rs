@@ -626,6 +626,7 @@ fn set_app_icon(app: tauri::AppHandle, name: String) -> Result<(), String> {
     let bytes: &[u8] = match name.as_str() {
         "onethu" => include_bytes!("../icons/icon.png"),
         "thuinfo" => include_bytes!("../icons/icon-thuinfo.png"),
+        "mascot" => include_bytes!("../icons/icon-mascot.png"),
         "custom" => return Ok(()), // 自定义走 set_app_icon_custom
         other => return Err(format!("未知图标: {other}")),
     };

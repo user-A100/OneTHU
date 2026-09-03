@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!-- 自适应图标：图案铺满背景层（内容到边，蒙版负责裁形，无白环） -->
 <adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
-    <background android:drawable="@mipmap/ic_launcher_bg" />
+    <background android:drawable="@mipmap/ic_launcher_mascot_bg" />
 </adaptive-icon>

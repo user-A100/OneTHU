@@ -17,6 +17,7 @@ export const CUSTOM_ICON_ID = "custom";
 /** 缩略图直接引用 src-tauri/icons 下的同一 PNG（Vite 构建期内联） */
 import iconOnethu from "../../src-tauri/icons/icon.png";
 import iconThuinfo from "../../src-tauri/icons/icon-thuinfo.png";
+import iconMascot from "../../src-tauri/icons/icon-mascot.png";
 
 export interface AppIconOption {
   id: string;
@@ -24,10 +25,11 @@ export interface AppIconOption {
   src: string;
 }
 
-/** 内置图标注册表：新增 = icons/ 放 PNG + Rust match 加一行 + alias/mipmap + 这里加一行 */
+/** 内置图标注册表：新增 = icons/ 放 PNG + Rust/Kotlin match 加一行 + alias/mipmap + 这里加一行 */
 export const APP_ICON_OPTIONS: AppIconOption[] = [
   { id: "onethu", label: "OneTHU 默认", src: iconOnethu },
   { id: "thuinfo", label: "THU Info", src: iconThuinfo },
+  { id: "mascot", label: "看板娘", src: iconMascot },
 ];
 
 export async function isAndroid(): Promise<boolean> {
