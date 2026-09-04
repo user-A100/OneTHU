@@ -4,7 +4,20 @@
  * 节流窗口内的第二次失败返回 false，由调用方亮可重试错误。
  * 使用方：校园卡（useCard）、图书馆（LibraryTab）、选课工作台失登自愈（zhjwxk）。
  */
+/** 模块加载 ≈ 冷启动/整页重载时刻。乐观启动窗口期（后台校验/静默重登进行中，
+ *  真机实测可长达 6s+）页面请求会经 runUngated 全局旁路绕过闸门撞上失效会话，
+ *  此时整页重载只会打断重登、循环往复（真机实录：校园卡 tab 在重登完成前失败
+ *  → reload → 重启后又失败）。启动宽限期内禁止自动整页重载，交给页内延时重试
+ *  （useRetryOnVisible）自愈。 */
+const BOOT_GRACE_MS = 30_000;
+const bootedAt = Date.now();
+
+export function inBootGrace(): boolean {
+  return Date.now() - bootedAt < BOOT_GRACE_MS;
+}
+
 export function autoFullReload(scope: string): boolean {
+  if (inBootGrace()) return false;
   try {
     const key = `onethu.autoreload.${scope}`;
     const last = Number(sessionStorage.getItem(key) ?? "0");

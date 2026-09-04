@@ -13,6 +13,7 @@ import { useEffect, useRef } from "react";
 import { ErrorNote, Empty, Card } from "../../components/Layout.js";
 import { explainNetworkError } from "../../lib/transport.js";
 import { logLine } from "../../lib/clients.js";
+import { inBootGrace } from "../../lib/reload.js";
 
 /**
  * tab 可见且尚无数据 → 自动补拉（inFlight 防抖：请求悬挂中不叠加）。
@@ -55,14 +56,20 @@ export function useRetryOnVisible(
 
   useEffect(() => {
     if (!visible || settled) return;
-    const t = setTimeout(() => {
-      if (inFlight.current || attempts.current >= 3) return;
-      attempts.current += 1;
-      inFlight.current = true;
-      void Promise.resolve(loadRef.current()).finally(() => {
-        inFlight.current = false;
-      });
-    }, 5000);
+    let t: ReturnType<typeof setTimeout>;
+    const schedule = () => {
+      t = setTimeout(() => {
+        if (!inFlight.current && attempts.current < 3) {
+          attempts.current += 1;
+          inFlight.current = true;
+          void Promise.resolve(loadRef.current()).finally(() => {
+            inFlight.current = false;
+          });
+        }
+        schedule(); // 链式重排：5s/10s/15s 三连试，覆盖静默重登窗口（真机实测 6s+）
+      }, 5000);
+    };
+    schedule();
     return () => clearTimeout(t);
   }, [visible, settled]);
 }
@@ -90,8 +97,11 @@ export function isTransientNetworkError(err: unknown): boolean {
   return /网络错误|timeout|timed? ?out|error sending request|connect|Failed to fetch|Network request failed/i.test(err.message);
 }
 
-/** 红条前自动硬刷新守卫：返回 true 表示已触发整页重载（调用方后续 setState 无意义） */
+/** 红条前自动硬刷新守卫：返回 true 表示已触发整页重载（调用方后续 setState 无意义）。
+ *  启动宽限期内不刷（乐观启动窗口期页面请求会旁路闸门撞失效会话，重载只会打断
+ *  静默重登形成循环），交给 useRetryOnVisible 延时自愈。 */
 export function hardReloadBailOut(scope: string): boolean {
+  if (inBootGrace()) return false;
   try {
     const key = `onethu.bailout.${scope}`;
     const now = Date.now();
