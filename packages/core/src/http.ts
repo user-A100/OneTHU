@@ -298,6 +298,14 @@ export class HttpClient {
     }
   }
 
+  /** 等待闸门放行（runUngated 上下文内立即返回）。闸门挂起期间客户端连网
+   *  请求都不会发出，但「无网即抛」的本地前置校验（learn #requireCsrf 等）
+   *  不经过 request()——它们必须在入口先调此方法，否则会在校验/静默重登
+   *  完成前瞬间抛 AuthRequiredError，页面误显错误。 */
+  async gateWait(): Promise<void> {
+    await this.#awaitGate();
+  }
+
   async #awaitGate(): Promise<void> {
     if (this.#gate && !this.#gateBypass) await this.#gate.catch(() => undefined);
   }

@@ -455,8 +455,12 @@ export class LearnClient {
     }
   }
 
-  /** 会话失效直接上抛，由 CampusSession/UI 决定是否重登录（密码不落盘，core 不自动重试） */
+  /** 会话失效直接上抛，由 CampusSession/UI 决定是否重登录（密码不落盘，core 不自动重试）。
+   *  入口先等请求闸门：乐观启动期间 csrf 未水合，#requireCsrf 会「无网即抛」——
+   *  不等闸门的话页面加载会在后台校验/静默重登完成前瞬间误报失效。
+   *  校验链自身经 runUngated 进来，gateWait 在 bypass 上下文立即返回，无死锁。 */
   async #withRelogin<T>(fn: () => Promise<T>): Promise<T> {
+    await this.#http.gateWait();
     return fn();
   }
 
