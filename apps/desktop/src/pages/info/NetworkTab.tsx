@@ -6,11 +6,11 @@
  * 登录面板，验证码图经 core 会话拉取转 base64。失败一律静态提示+重试，
  * 绝不自动整页刷新、绝不失登自愈。
  */
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useState } from "react";
 import { Card, ErrorNote, SectionHead, SkeletonRows } from "../../components/Layout.js";
 import { info } from "../../lib/clients.js";
 import { useApp } from "../../state/context.js";
-import { TabEmpty, logTabErr, isAuthExpired } from "./tabStates.js";
+import { TabEmpty, logTabErr, isAuthExpired, useRetryOnVisible } from "./tabStates.js";
 import type { NetworkDevice } from "@onethu/core";
 
 type LoadState = "loading" | "error" | "ready" | "captcha";
@@ -18,7 +18,7 @@ type NetworkRow = [string, string];
 
 const NEED_CAPTCHA = /需要验证码登录/;
 
-export function NetworkTab() {
+export function NetworkTab({ visible = true }: { visible?: boolean }) {
   const { status } = useApp();
   const [rows, setRows] = useState<NetworkRow[] | null>(null);
   const [devices, setDevices] = useState<NetworkDevice[] | null>(null);
@@ -114,9 +114,8 @@ export function NetworkTab() {
     }
   }, [status, refreshCaptcha]);
 
-  useEffect(() => {
-    void load();
-  }, [load]);
+  // 挂载即拉 + 「切走再切回仍无数据」自动补拉（验证码门属可交互态，不视为待补拉）
+  useRetryOnVisible(visible, state === "ready" || state === "captcha", load);
 
   const doLogin = useCallback(
     async (c: string) => {

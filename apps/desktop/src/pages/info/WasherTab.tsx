@@ -4,13 +4,14 @@
  * （yshz-user.haier-ioc.com）公开接口，无需校内会话。
  * 设备状态：空闲（绿）/ 运行中·剩余分钟（灰）/ 故障（红）。
  */
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import type { WasherBuilding, WasherBuildingGroup, WasherDevice } from "@onethu/core";
 import { getWasherBuildingGroups, getWasherDevices } from "@onethu/core";
 import { Card, Empty, ErrorNote, SectionHead, SkeletonRows } from "../../components/Layout.js";
 import { logLine } from "../../lib/clients.js";
 import { explainNetworkError, universalFetch } from "../../lib/transport.js";
 import { useApp } from "../../state/context.js";
+import { useRetryOnVisible } from "./tabStates.js";
 
 function logErr(tag: string, err: unknown): void {
   void logLine(
@@ -62,18 +63,8 @@ export function WasherTab({ visible = true }: { visible?: boolean }) {
     }
   }, [status]);
 
-  useEffect(() => {
-    void loadGroups();
-  }, [loadGroups]);
-
-  /** tab 切回可见仍无数据 → 自动补拉：挂载时 status 未就绪被早退（乐观启动/
-   *  重登窗口期点进来的实例）后无人重触发；保持挂载的 tab 切换也不会重挂。
-   *  inFlight 防抖：请求悬挂中不叠加。 */
-  useEffect(() => {
-    if (visible && status === "ready" && groups === null && !inFlightRef.current) {
-      void loadGroups();
-    }
-  }, [visible, status, groups, loadGroups]);
+  // 挂载即拉 + 可见仍无数据自动补拉（含 5s 延时重试，首个 tab 不用切走再切回）
+  useRetryOnVisible(visible, groups !== null, loadGroups);
 
   const loadDevices = useCallback(async (b: WasherBuilding) => {
     setSel(b);

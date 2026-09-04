@@ -103,17 +103,30 @@ export function LifePage() {
         <Empty text="所有栏目已隐藏，点击右上「管理栏目」恢复。" />
       ) : (
         <>
-          {/* 模块头由栏目名与各 tab 内部分区标题承担（WasherTab 自带「洗衣机」头） */}
-          <div hidden={effTab !== "dorm"}>{visited.has("dorm") ? <DormTab /> : null}</div>
+          {/* 模块头由栏目名与各 tab 内部分区标题承担（WasherTab 自带「洗衣机」头）。
+              各 tab 收 visible：切回可见仍无数据时自动补拉（tab 保持挂载不重挂） */}
+          <div hidden={effTab !== "dorm"}>
+            {visited.has("dorm") ? <DormTab visible={effTab === "dorm"} /> : null}
+          </div>
           <div hidden={effTab !== "washer"}>
             {visited.has("washer") ? <WasherTab visible={effTab === "washer"} /> : null}
           </div>
-          <div hidden={effTab !== "hygiene"}>{visited.has("hygiene") ? <HygieneTab /> : null}</div>
+          <div hidden={effTab !== "hygiene"}>
+            {visited.has("hygiene") ? <HygieneTab visible={effTab === "hygiene"} /> : null}
+          </div>
           <div hidden={effTab !== "card"}>{visited.has("card") ? <CardTab /> : null}</div>
-          <div hidden={effTab !== "invoice"}>{visited.has("invoice") ? <InvoiceTab /> : null}</div>
-          <div hidden={effTab !== "payroll"}>{visited.has("payroll") ? <PayrollTab /> : null}</div>
-          <div hidden={effTab !== "gradincome"}>{visited.has("gradincome") ? <GradIncomeTab /> : null}</div>
-          <div hidden={effTab !== "network"}>{visited.has("network") ? <NetworkTab /> : null}</div>
+          <div hidden={effTab !== "invoice"}>
+            {visited.has("invoice") ? <InvoiceTab visible={effTab === "invoice"} /> : null}
+          </div>
+          <div hidden={effTab !== "payroll"}>
+            {visited.has("payroll") ? <PayrollTab visible={effTab === "payroll"} /> : null}
+          </div>
+          <div hidden={effTab !== "gradincome"}>
+            {visited.has("gradincome") ? <GradIncomeTab visible={effTab === "gradincome"} /> : null}
+          </div>
+          <div hidden={effTab !== "network"}>
+            {visited.has("network") ? <NetworkTab visible={effTab === "network"} /> : null}
+          </div>
         </>
       )}
 

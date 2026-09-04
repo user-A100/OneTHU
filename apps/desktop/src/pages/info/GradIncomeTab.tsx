@@ -4,11 +4,11 @@
  * core 返回 null = 无权限/无数据（本科生常态）→ 「研究生专项目」空态，绝不报失登。
  * 空数据/维护态铁律见 tabStates.tsx；绝不自动整页刷新。
  */
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useState } from "react";
 import { Card, SectionHead, SkeletonRows } from "../../components/Layout.js";
 import { info } from "../../lib/clients.js";
 import { useApp } from "../../state/context.js";
-import { TabEmpty, TabError, isServiceUnavailable, logTabErr, tabErrorText } from "./tabStates.js";
+import { TabEmpty, TabError, isServiceUnavailable, logTabErr, tabErrorText, useRetryOnVisible } from "./tabStates.js";
 
 type LoadState = "loading" | "error" | "ready" | "none";
 /** core getGraduateIncome → 发放记录（ym=发放日期中文，afterTax=实发） */
@@ -25,7 +25,7 @@ function recentRange(): { begin: string; end: string } {
   };
 }
 
-export function GradIncomeTab() {
+export function GradIncomeTab({ visible = true }: { visible?: boolean }) {
   const { status } = useApp();
   const [rows, setRows] = useState<GradIncomeRow[] | null>(null);
   const [state, setState] = useState<LoadState>("loading");
@@ -55,9 +55,8 @@ export function GradIncomeTab() {
     }
   }, [status]);
 
-  useEffect(() => {
-    void load();
-  }, [load]);
+  // 挂载即拉 + 「切走再切回仍无数据」自动补拉（聚合页 tab 保持挂载不重挂）
+  useRetryOnVisible(visible, state === "ready" || state === "none", load);
 
   if (status === "demo") {
     return <TabEmpty text="演示模式不提供研究生收入数据，登录后可查看发放记录。" />;

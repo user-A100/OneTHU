@@ -3,11 +3,11 @@
  * 家园网宿舍卫生检查成绩单（base64 图片，可缩放）；null = 暂无检查数据。
  * 空数据/维护态铁律见 tabStates.tsx；绝不自动整页刷新。
  */
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useState } from "react";
 import { Card, SectionHead, SkeletonRows } from "../../components/Layout.js";
 import { info } from "../../lib/clients.js";
 import { useApp } from "../../state/context.js";
-import { TabEmpty, TabError, isServiceUnavailable, logTabErr, tabErrorText } from "./tabStates.js";
+import { TabEmpty, TabError, isServiceUnavailable, logTabErr, tabErrorText, useRetryOnVisible } from "./tabStates.js";
 
 type LoadState = "loading" | "error" | "ready" | "none";
 
@@ -17,7 +17,7 @@ function toImageSrc(raw: string): string {
   return `data:image/png;base64,${raw}`;
 }
 
-export function HygieneTab() {
+export function HygieneTab({ visible = true }: { visible?: boolean }) {
   const { status } = useApp();
   const [image, setImage] = useState<string | null>(null);
   const [state, setState] = useState<LoadState>("loading");
@@ -47,9 +47,8 @@ export function HygieneTab() {
     }
   }, [status]);
 
-  useEffect(() => {
-    void load();
-  }, [load]);
+  // 挂载即拉 + 「切走再切回仍无数据」自动补拉（聚合页 tab 保持挂载不重挂）
+  useRetryOnVisible(visible, state === "ready" || state === "none", load);
 
   if (status === "demo") {
     return <TabEmpty text="演示模式不提供卫生成绩数据，登录后可查看宿舍卫生检查成绩。" />;

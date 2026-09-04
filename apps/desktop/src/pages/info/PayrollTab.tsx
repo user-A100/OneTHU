@@ -2,17 +2,17 @@
  * 银行代发 —— info.getBankPayment（thu-info-app bankPayment.tsx 移植）。
  * 按月分组的工资/奖金发放记录（部门 · 项目 · 实发）。空数据/维护态铁律见 tabStates.tsx。
  */
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useState } from "react";
 import { Card, SectionHead, SkeletonRows } from "../../components/Layout.js";
 import { info } from "../../lib/clients.js";
 import { useApp } from "../../state/context.js";
-import { TabEmpty, TabError, isServiceUnavailable, logTabErr, tabErrorText } from "./tabStates.js";
+import { TabEmpty, TabError, isServiceUnavailable, logTabErr, tabErrorText, useRetryOnVisible } from "./tabStates.js";
 
 type LoadState = "loading" | "error" | "ready";
 /** core getBankPayment → 按月分组（month 形如 "2021年12月"） */
 type PayrollMonth = Awaited<ReturnType<typeof info.getBankPayment>>[number];
 
-export function PayrollTab() {
+export function PayrollTab({ visible = true }: { visible?: boolean }) {
   const { status } = useApp();
   const [months, setMonths] = useState<PayrollMonth[] | null>(null);
   const [state, setState] = useState<LoadState>("loading");
@@ -35,9 +35,8 @@ export function PayrollTab() {
     }
   }, [status]);
 
-  useEffect(() => {
-    void load();
-  }, [load]);
+  // 挂载即拉 + 「切走再切回仍无数据」自动补拉（聚合页 tab 保持挂载不重挂）
+  useRetryOnVisible(visible, state === "ready", load);
 
   if (status === "demo") {
     return <TabEmpty text="演示模式不提供银行代发数据，登录后可查看发放记录。" />;

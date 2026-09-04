@@ -9,9 +9,63 @@
  * - 登录态失效也只落静态提示 + 重试，绝不触发失登自愈（autoFullReload / backToLogin）——
  *   本批 tab 一律不调用 reload.ts / autoFullReload。
  */
+import { useEffect, useRef } from "react";
 import { ErrorNote, Empty, Card } from "../../components/Layout.js";
 import { explainNetworkError } from "../../lib/transport.js";
 import { logLine } from "../../lib/clients.js";
+
+/**
+ * tab 可见且尚无数据 → 自动补拉（inFlight 防抖：请求悬挂中不叠加）。
+ * 背景：聚合页（LifePage 等）的 tab 首次激活后保持挂载（visited + hidden），
+ * 切回不重挂——首个 tab 常在启动竞态窗口期完成首次加载且失败，此后无人
+ * 重触发，一直空白，用户被迫「切走再切回」才有数据（各 tab 手动补的点）。
+ * 两层触发：
+ * - 即时：可见且无数据就拉（挂载首跳 + 切走再切回沿）；skipMount=true 时
+ *   跳过挂载首跳（tab 自身挂载 effect 已带缓存/TTL 逻辑，如 DormTab）。
+ * - 延时：可见且仍无数据，5s 后再试（最多 3 次，成功清零）——启动竞态窗口
+ *   通常几秒内结束，首个 tab 无需用户切走再切回即可自愈。
+ */
+export function useRetryOnVisible(
+  visible: boolean,
+  settled: boolean,
+  load: () => Promise<unknown>,
+  opts: { skipMount?: boolean } = {},
+): void {
+  const inFlight = useRef(false);
+  const attempts = useRef(0);
+  const loadRef = useRef(load);
+  loadRef.current = load;
+
+  useEffect(() => {
+    if (settled) {
+      attempts.current = 0;
+      return;
+    }
+    if (!visible) return;
+    if (opts.skipMount && attempts.current === 0) {
+      attempts.current = 1; // 挂载首跳交给 tab 自身的缓存/TTL effect
+      return;
+    }
+    if (inFlight.current) return;
+    inFlight.current = true;
+    void Promise.resolve(loadRef.current()).finally(() => {
+      inFlight.current = false;
+    });
+  }, [visible, settled, load]);
+
+  useEffect(() => {
+    if (!visible || settled) return;
+    const t = setTimeout(() => {
+      if (inFlight.current || attempts.current >= 3) return;
+      attempts.current += 1;
+      inFlight.current = true;
+      void Promise.resolve(loadRef.current()).finally(() => {
+        inFlight.current = false;
+      });
+    }, 5000);
+    return () => clearTimeout(t);
+  }, [visible, settled]);
+}
 
 /** 页内错误落盘（与 DormTab logErr 同款，只写 /tmp/onethu-debug.log） */
 export function logTabErr(tag: string, err: unknown): void {

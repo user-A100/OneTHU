@@ -13,6 +13,7 @@ import { info, logLine } from "../../lib/clients.js";
 import { explainNetworkError, universalFetch } from "../../lib/transport.js";
 import { useApp } from "../../state/context.js";
 import { cacheGet, cacheSet } from "../../state/cache.js";
+import { useRetryOnVisible } from "./tabStates.js";
 
 /* 整页重载式自愈（用户语义：等同手动右键刷新，从头载入）。
    sessionStorage 节流：2 分钟内只自动重载一次，防止坏会话死循环；超限亮红交给用户。 */
@@ -51,7 +52,7 @@ const STATUS_CHIP: Record<string, string> = {
 const ELEC_KEY = "dorm:elec";
 const ELEC_TTL = 5 * 60 * 1000;
 
-export function DormTab() {
+export function DormTab({ visible = true }: { visible?: boolean }) {
   const { status } = useApp();
 
   /* ---------------- 电费（家园网会话 + SWR 缓存） ---------------- */
@@ -106,6 +107,9 @@ export function DormTab() {
     if (!cached) void loadElec(false);
     else if (Date.now() - cached.at > ELEC_TTL) void loadElec(true);
   }, [status, loadElec]);
+
+  // 「切走再切回仍无数据」自动补拉（挂载首跳由上方缓存/TTL effect 负责）
+  useRetryOnVisible(visible, elecState === "ready", () => loadElec(false), { skipMount: true });
 
   /* ---------------- 订水（公开接口） ---------------- */
   const [waterId, setWaterId] = useState("");
