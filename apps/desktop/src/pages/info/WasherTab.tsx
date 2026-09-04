@@ -4,7 +4,7 @@
  * （yshz-user.haier-ioc.com）公开接口，无需校内会话。
  * 设备状态：空闲（绿）/ 运行中·剩余分钟（灰）/ 故障（红）。
  */
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { WasherBuilding, WasherBuildingGroup, WasherDevice } from "@onethu/core";
 import { getWasherBuildingGroups, getWasherDevices } from "@onethu/core";
 import { Card, Empty, ErrorNote, SectionHead, SkeletonRows } from "../../components/Layout.js";
@@ -29,12 +29,13 @@ function deviceVisual(w: WasherDevice): { dot: string; chip: string; text: strin
   return { dot: "is-error", chip: "chip chip-red", text: "故障" };
 }
 
-export function WasherTab() {
+export function WasherTab({ visible = true }: { visible?: boolean }) {
   const { status } = useApp();
 
   const [groups, setGroups] = useState<WasherBuildingGroup[] | null>(null);
   const [gState, setGState] = useState<LoadState>("loading");
   const [gError, setGError] = useState<string | null>(null);
+  const inFlightRef = useRef(false);
 
   const [sel, setSel] = useState<WasherBuilding | null>(null);
   const [floors, setFloors] = useState<Array<{ floor: string; washers: WasherDevice[] }> | null>(null);
@@ -45,7 +46,8 @@ export function WasherTab() {
   const [query, setQuery] = useState("");
 
   const loadGroups = useCallback(async () => {
-    if (status !== "ready") return;
+    if (status !== "ready" || inFlightRef.current) return;
+    inFlightRef.current = true;
     setGState("loading");
     setGError(null);
     try {
@@ -55,12 +57,23 @@ export function WasherTab() {
       logErr("WASHER-G", err);
       setGState("error");
       setGError(explainNetworkError(err));
+    } finally {
+      inFlightRef.current = false;
     }
   }, [status]);
 
   useEffect(() => {
     void loadGroups();
   }, [loadGroups]);
+
+  /** tab 切回可见仍无数据 → 自动补拉：挂载时 status 未就绪被早退（乐观启动/
+   *  重登窗口期点进来的实例）后无人重触发；保持挂载的 tab 切换也不会重挂。
+   *  inFlight 防抖：请求悬挂中不叠加。 */
+  useEffect(() => {
+    if (visible && status === "ready" && groups === null && !inFlightRef.current) {
+      void loadGroups();
+    }
+  }, [visible, status, groups, loadGroups]);
 
   const loadDevices = useCallback(async (b: WasherBuilding) => {
     setSel(b);
